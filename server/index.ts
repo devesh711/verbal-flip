@@ -8,6 +8,8 @@ import * as bcrypt from 'bcryptjs';
 import { Server } from 'socket.io';
 import { createServer } from 'http';
 import { v4 as uuidv4 } from 'uuid';
+import { GoogleGenAI } from "@google/genai";
+
 dotenv.config();
 
 const { 
@@ -15,10 +17,11 @@ const {
   JWT_SECRET, 
   VITE_GOOGLE_CLIENT_ID, 
   VITE_GOOGLE_CLIENT_SECRET,
+  GOOGLE_GEMINI_API_KEY,
 } = process.env;
 
-if (!MONGODB_URI || !JWT_SECRET || !VITE_GOOGLE_CLIENT_ID || !VITE_GOOGLE_CLIENT_SECRET) {
-  console.error('Missing critical environment variables. Please check MONGODB_URI, JWT_SECRET, VITE_GOOGLE_CLIENT_ID, and VITE_GOOGLE_CLIENT_SECRET.');
+if (!MONGODB_URI || !JWT_SECRET || !VITE_GOOGLE_CLIENT_ID || !VITE_GOOGLE_CLIENT_SECRET || !GOOGLE_GEMINI_API_KEY) {
+  console.error('Missing critical environment variables. Please check MONGODB_URI, JWT_SECRET, VITE_GOOGLE_CLIENT_ID, VITE_GOOGLE_CLIENT_SECRET, and GOOGLE_GEMINI_API_KEY.');
   process.exit(1);
 }
 
@@ -34,100 +37,78 @@ const io = new Server(httpServer, {
 app.use(cors());
 app.use(express.json());
 
-// Inline translation functions
+// ------------------ Inline Translation Logic Begin ------------------
 
-function detectLanguage(text: string): 'en' | 'ta' {
-  const tamilRange = /[\u0B80-\u0BFF]/;
-  return tamilRange.test(text) ? 'ta' : 'en';
-}
+// Initialize the Gemini client
+const ai = new GoogleGenAI({ apiKey: GOOGLE_GEMINI_API_KEY });
 
-async function translateText(
-  text: string,
-  sourceLang: 'en' | 'ta',
-  targetLang: 'en' | 'ta'
-): Promise<string> {
-  if (sourceLang === targetLang) {
-    return text; // No translation needed
+/**
+ * Calls Google Gemini API with the given prompt and returns the translated text.
+ * @param prompt The complete translation prompt.
+ * @returns The translated text from Gemini.
+ */
+const callGeminiAPI = async (prompt: string): Promise<string> => {
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash-preview-04-17",
+      contents: prompt,
+    });
+    // Assume the response contains a "text" field with the translated result.
+    return response.text || "";
+  } catch (error) {
+    console.error("Error calling Gemini API:", error);
+    return "";
   }
+};
 
-  await new Promise((resolve) => setTimeout(resolve, 500)); // Simulate API delay
-
-  const englishToTamilDict: Record<string, string> = {
-    'hello': 'வணக்கம்',
-    'how are you': 'நீங்கள் எப்படி இருக்கிறீர்கள்',
-    'good morning': 'காலை வணக்கம்',
-    'good night': 'இனிய இரவு',
-    'thank you': 'நன்றி',
-    'welcome': 'வரவேற்கிறோம்',
-    'yes': 'ஆம்',
-    'no': 'இல்லை',
-    'what is your name': 'உங்கள் பெயர் என்ன',
-    'my name is': 'என் பெயர்',
-    'how is the weather': 'வானிலை எப்படி உள்ளது',
-    'i like this app': 'எனக்கு இந்த ஆப் பிடித்துள்ளது',
-    'nice to meet you': 'உங்களை சந்தித்ததில் மகிழ்ச்சி',
-    'what are you doing': 'நீங்கள் என்ன செய்கிறீர்கள்',
-    'i am learning tamil': 'நான் தமிழ் கற்றுக்கொள்கிறேன்',
-    'see you later': 'பின்னர் பார்க்கலாம்',
-  };
-
-  const tamilToEnglishDict: Record<string, string> = {
-    'வணக்கம்': 'hello',
-    'நீங்கள் எப்படி இருக்கிறீர்கள்': 'how are you',
-    'காலை வணக்கம்': 'good morning',
-    'இனிய இரவு': 'good night',
-    'நன்றி': 'thank you',
-    'வரவேற்கிறோம்': 'welcome',
-    'ஆம்': 'yes',
-    'இல்லை': 'no',
-    'உங்கள் பெயர் என்ன': 'what is your name',
-    'என் பெயர்': 'my name is',
-    'வானிலை எப்படி உள்ளது': 'how is the weather',
-    'எனக்கு இந்த ஆப் பிடித்துள்ளது': 'i like this app',
-    'உங்களை சந்தித்ததில் மகிழ்ச்சி': 'nice to meet you',
-    'நீங்கள் என்ன செய்கிறீர்கள்': 'what are you doing',
-    'நான் தமிழ் கற்றுக்கொள்கிறேன்': 'i am learning tamil',
-    'பின்னர் பார்க்கலாம்': 'see you later',
-  };
-
-  if (sourceLang === 'en' && targetLang === 'ta') {
-    return englishToTamilDict[text.toLowerCase()] || `[தமிழில்: ${text}]`;
-  } else if (sourceLang === 'ta' && targetLang === 'en') {
-    return tamilToEnglishDict[text] || `[Translated: ${text}]`;
-  }
-
-  return text;
-}
-
-async function autoTranslate(
-  text: string,
-  targetLang: 'en' | 'ta'
+/**
+ * Automatically detects language and translates text using Google Gemini.
+ * @param text The text to translate.
+ * @param targetLang The target language ('en' or 'ta').
+ * @returns Object containing the translated text, detected language, and translation flag.
+ */
+const autoTranslate = async (
+  text: string, 
+  targetLang: "en" | "ta"
 ): Promise<{
   translatedText: string;
-  detectedLanguage: 'en' | 'ta';
+  detectedLanguage: "en" | "ta";
   isTranslated: boolean;
-}> {
-  const detectedLanguage = detectLanguage(text);
-  
+}> => {
+  // Simple language detection based on presence of Tamil Unicode range.
+  const tamilRange = /[\u0B80-\u0BFF]/;
+  const detectedLanguage: "en" | "ta" = tamilRange.test(text) ? "ta" : "en";
+
+  // If no translation is needed, return the original text.
   if (detectedLanguage === targetLang) {
     return {
       translatedText: text,
       detectedLanguage,
-      isTranslated: false
+      isTranslated: false,
     };
   }
-  
-  const translatedText = await translateText(text, detectedLanguage, targetLang);
-  
+
+  // Construct a clear, complete prompt for Google Gemini.
+  const targetLanguageFull = targetLang === "en" ? "English" : "Tamil";
+  const prompt = `Translate the following text into ${targetLanguageFull} while preserving its original tone, context, and meaning:
+
+Text: "${text}"
+
+Provide only the translated text in the response.`;
+
+  const translatedText = await callGeminiAPI(prompt);
+
   return {
-    translatedText,
+    translatedText: translatedText || text,
     detectedLanguage,
-    isTranslated: true
+    isTranslated: Boolean(translatedText),
   };
-}
+};
+
+// ------------------ Inline Translation Logic End ------------------
 
 // MongoDB connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/chat-app')
+mongoose.connect(MONGODB_URI || 'mongodb://localhost:27017/chat-app')
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
 
@@ -158,7 +139,8 @@ const messageSchema = new mongoose.Schema({
   translations: {
     en: String,
     ta: String
-  }
+  },
+  isTranslated: Boolean
 });
 
 const User = mongoose.model('User', userSchema);
@@ -175,7 +157,7 @@ const authenticateToken = (req: any, res: any, next: any) => {
   }
 
   try {
-    const verified = jwt.verify(token, process.env.JWT_SECRET!);
+    const verified = jwt.verify(token, JWT_SECRET!);
     req.user = verified;
     next();
   } catch (err) {
@@ -206,7 +188,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     const token = jwt.sign(
       { id: user._id, email: user.email },
-      process.env.JWT_SECRET!,
+      JWT_SECRET!,
       { expiresIn: '1d' }
     );
 
@@ -232,7 +214,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     const token = jwt.sign(
       { id: user._id, email: user.email },
-      process.env.JWT_SECRET!,
+      JWT_SECRET!,
       { expiresIn: '1d' }
     );
 
@@ -288,7 +270,7 @@ app.get('/api/messages/:roomId', authenticateToken, async (req, res) => {
   }
 });
 
-// Socket.IO
+// Socket.IO handling
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
@@ -299,18 +281,18 @@ io.on('connection', (socket) => {
 
   socket.on('message:send', async (messageData) => {
     try {
-      // Compute translations for both English and Tamil
+      // Compute translations for both English and Tamil using Gemini inline autoTranslate
       const enResult = await autoTranslate(messageData.text, 'en');
       const taResult = await autoTranslate(messageData.text, 'ta');
       
-      // Define the default display text (we use English here as default)
+      // Define the default display text (using English as default)
       const defaultText = enResult.translatedText;
       
-      // Explicitly assign each property to ensure senderId is stored correctly
+      // Explicitly assign each property so senderId is stored correctly
       const message = new Message({
         text: defaultText,
         originalText: messageData.text,
-        senderId: messageData.senderId,  // explicitly include senderId
+        senderId: messageData.senderId,
         roomId: messageData.roomId,
         timestamp: messageData.timestamp,
         translations: {
@@ -322,7 +304,7 @@ io.on('connection', (socket) => {
   
       await message.save();
   
-      // Populate sender details (excluding the password) so UI can map the message to the correct user
+      // Populate sender details (excluding password) for proper UI mapping
       const populatedMessage = await Message.findById(message._id).populate('senderId', '-password');
       io.to(messageData.roomId).emit('message:received', populatedMessage);
     } catch (error) {
